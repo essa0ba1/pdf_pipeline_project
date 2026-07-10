@@ -37,7 +37,8 @@ import logging
 import os
 from pathlib import Path
 from typing import List, Optional, Sequence, Union
-
+import base64
+import io
 import cv2
 import numpy as np
 from PIL import Image
@@ -93,6 +94,17 @@ def crop_and_save_image(image: Image.Image, bbox: tuple, index: int, doc_path: s
     return out_path
 
 
+
+def crop_to_base64(image: Image.Image, bbox: tuple, fmt: str = "PNG") -> str:
+    """Crop `bbox` (xyxy, pixel space) out of `image` and return a base64
+    data URI, ready to embed directly in markdown — no file written to disk."""
+    cropped = image.crop(bbox)
+    buffer = io.BytesIO()
+    cropped.save(buffer, format=fmt)
+    b64_data = base64.b64encode(buffer.getvalue()).decode("ascii")
+    return f"data:image/{fmt.lower()};base64,{b64_data}"
+
+
 def _table_tokens_from_page(
     bbox: tuple, page_tokens: Optional[List[PlacedWord]]
 ) -> List[dict]:
@@ -128,18 +140,7 @@ def region_to_markdown(
     table_runner: Optional[TableFormerONNX] = None,
     table_ocr_backend: Optional[OCRBackend] = None,
     page_tokens: Optional[List[PlacedWord]] = None,
-   
 ) -> str:
-    """
-    Render one matched region as a markdown fragment, per its layout class.
-    This is the convergence point both matching branches feed into.
-
-    For `table` regions: if `page_tokens` (the page's pdfplumber words,
-    scaled to image space) has words inside this region, those are used
-    directly instead of OCR — the PDF already has a text layer there, so
-    re-OCR-ing the crop would only add noise. OCR via `table_ocr_backend` is
-    the fallback for tables with no underlying text (scanned pages/images).
-    """
     label = region.class_name
     logger.debug("Rendering region %d: class=%s bbox=%s", index, label, region.bbox)
 
@@ -148,25 +149,28 @@ def region_to_markdown(
         return ""
 
     if label == "table":
-        image_path = crop_and_save_image(img, region.bbox, index, doc_path)
-        logger.info("Table region %d: crop saved to %s", index, image_path)
         if table_runner is not None:
             table_tokens = _table_tokens_from_page(region.bbox, page_tokens)
+            tmp_path = None
             try:
+                import tempfile
+                cropped = img.crop(region.bbox)
+                with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
+                    cropped.save(tmp, format="PNG")
+                    tmp_path = tmp.name
+
                 if table_tokens:
                     logger.info(
                         "Table region %d: using %d pdfplumber tokens (no OCR)",
-                        index,
-                        len(table_tokens),
+                        index, len(table_tokens),
                     )
-                    otsl = table_image_to_otsl(table_runner, image_path, tokens=table_tokens)
+                    otsl = table_image_to_otsl(table_runner, tmp_path, tokens=table_tokens)
                 elif table_ocr_backend is not None:
                     logger.info(
                         "Table region %d: no pdfplumber tokens — OCR via %s",
-                        index,
-                        type(table_ocr_backend).__name__,
+                        index, type(table_ocr_backend).__name__,
                     )
-                    otsl = table_image_to_otsl(table_runner, image_path, backend=table_ocr_backend)
+                    otsl = table_image_to_otsl(table_runner, tmp_path, backend=table_ocr_backend)
                 else:
                     raise ValueError(
                         "no pdfplumber words found in this table region and no "
@@ -175,34 +179,31 @@ def region_to_markdown(
                 table_md, df = otsl_to_markdown(otsl)
                 if df is not None:
                     logger.info(
-                        "Table region %d: extracted %d rows x %d cols",
-                        index,
-                        df.shape[0],
-                        df.shape[1],
+                        "Table region %d: extracted %d rows x %d cols (Excel export disabled)",
+                        index, df.shape[0], df.shape[1],
                     )
                     logger.debug("Table region %d dataframe:\n%s", index, df)
-                    stem = doc_path.split(".")[0]
-                    excel_dir = os.path.join(stem, "excel")
-                    os.makedirs(excel_dir, exist_ok=True)
-                    excel_path = f"{excel_dir}/{index}.xlsx"
-                    df.to_excel(excel_path, index=False)
-                    logger.info("Table region %d: wrote Excel to %s", index, excel_path)
+                    # Excel export intentionally disabled for now.
 
                 return f"{table_md}\n\n"
-            except Exception as exc:  # model/OCR failure: fall back to an image link
+            except Exception as exc:
                 logger.warning(
                     "Table region %d: extraction failed (%s) — falling back to image embed",
-                    index,
-                    exc,
+                    index, exc,
                 )
-                return f"<!-- table extraction failed: {exc} -->\n![table]({image_path})\n\n"
+                image_b64 = crop_to_base64(img, region.bbox)
+                return f"<!-- table extraction failed: {exc} -->\n![table]({image_b64})\n\n"
+            finally:
+                if tmp_path and os.path.exists(tmp_path):
+                    os.remove(tmp_path)
         logger.info("Table region %d: no TableFormer configured — embedding crop", index)
-        return f"![table]({image_path})\n\n"
+        image_b64 = crop_to_base64(img, region.bbox)
+        return f"![table]({image_b64})\n\n"
 
     if label in IMAGE_LIKE_CLASSES:
-        image_path = crop_and_save_image(img, region.bbox, index, doc_path)
-        logger.info("Image-like region %d (%s): saved to %s", index, label, image_path)
-        return f"![{label}]({image_path})\n\n"
+        image_b64 = crop_to_base64(img, region.bbox)
+        logger.info("Image-like region %d (%s): embedded as base64", index, label)
+        return f"![{label}]({image_b64})\n\n"
 
     text = region.text
     if not text:
@@ -214,19 +215,16 @@ def region_to_markdown(
         return f"## {text}\n\n"
     if label == "aside_text":
         return f"> {text}\n\n"
-    if label=="figure_title":
+    if label == "figure_title":
         return f"### {text}\n\n"
-    if label=="image":
-       
-        image_path = crop_and_save_image(img, region.bbox, index, doc_path)
-        output = f"![{label}]({image_path})\n\n"
+    if label == "image":
+        image_b64 = crop_to_base64(img, region.bbox)
+        output = f"![{label}]({image_b64})\n\n"
         if text.strip():
             output += f"{text}\n\n"
         return output
-              
+
     return f"{text}\n\n"
-
-
 
 def regions_to_markdown(
     regions: List[RegionText],

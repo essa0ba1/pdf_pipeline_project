@@ -1,0 +1,17 @@
+# Git LFS configuration for large model files
+# This ensures ONNX models and data files are tracked with Git LFS
+
+# ONNX model files
+*.onnx filter=lfs diff=lfs merge=lfs -text
+*.onnx.data filter=lfs diff=lfs merge=lfs -text
+
+# Model data files
+*.data filter=lfs diff=lfs merge=lfs -text
+*.bin filter=lfs diff=lfs merge=lfs -text
+
+# Large JSON config files (if they exceed GitHub's 100MB limit)
+*.json filter=lfs diff=lfs merge=lfs -text
+
+# Note: Model directories that are auto-downloaded via HuggingFace Hub
+# (PP-DocLayout/, tableformerv1/, pp_ocr_small/, pp_ocr_medium/)
+# should be added to .gitignore, not tracked in Git LFS

@@ -187,7 +187,7 @@ def main() -> None:
         )
         table_variant = st.selectbox(
             "TableFormer variant",
-            options=["accurate","fast"],
+            options=["accurate"],
             index=0,
         )
         ocr_backend = st.selectbox(
