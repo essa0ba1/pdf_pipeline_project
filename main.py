@@ -59,20 +59,28 @@ def _resolve_local_or_download(
     repo via `downloader` (defaults to `huggingface_hub.snapshot_download`,
     swappable in tests) and return the resolved path to `filename` inside it.
 
-    Centralizing this "check local, else download" pattern also fixes two
+    Centralizing this "check local, else download" pattern also fixes three
     bugs present in the original per-model inline logic:
     - the medium OCR recognizer path used to skip appending `filename`,
       resolving to a directory instead of the actual model file
     - the small OCR recognizer's fallback downloaded into the *medium*
       model's local_dir by mistake
+    - `snapshot_download` has no `subfolder` parameter (that belongs to
+      `hf_hub_download`, a different function) — restricting the download
+      to one folder of the repo requires `allow_patterns` instead, which is
+      what's used here
     """
     if os.path.exists(local_path):
         return local_path
     kwargs = {"repo_id": repo_id, "local_dir": local_dir}
     if subfolder is not None:
-        kwargs["subfolder"] = subfolder
+        kwargs["allow_patterns"] = [f"{subfolder}/*"]
     downloaded_dir = downloader(**kwargs)
-    return os.path.join(downloaded_dir, filename)
+    return (
+        os.path.join(downloaded_dir, subfolder, filename)
+        if subfolder is not None
+        else os.path.join(downloaded_dir, filename)
+    )
 
 
 def resolve_model_paths(downloader=snapshot_download) -> ModelPaths:
