@@ -50,7 +50,6 @@ def _resolve_local_or_download(
     local_path: str,
     repo_id: str,
     local_dir: str,
-    subfolder: str | None = None,
     filename: str = "inference.onnx",
     downloader=snapshot_download,
     progress_callback=None,
@@ -65,32 +64,30 @@ def _resolve_local_or_download(
     freshly downloaded) — used to drive a live status indicator in the UI
     without making this function depend on Streamlit.
 
-    Centralizing this "check local, else download" pattern also fixes three
-    bugs present in the original per-model inline logic:
+    Centralizing this "check local, else download" pattern also fixes bugs
+    present in the original per-model inline logic:
     - the medium OCR recognizer path used to skip appending `filename`,
       resolving to a directory instead of the actual model file
     - the small OCR recognizer's fallback downloaded into the *medium*
       model's local_dir by mistake
     - `snapshot_download` has no `subfolder` parameter (that belongs to
-      `hf_hub_download`, a different function) — restricting the download
-      to one folder of the repo requires `allow_patterns` instead, which is
-      what's used here
+      `hf_hub_download`, a different function)
+    - each OCR det/rec model lives in its OWN single-purpose HF repo (e.g.
+      `PP-OCRv6_small_det_onnx` vs `PP-OCRv6_small_rec_onnx`) with no nested
+      `det/`/`rec/` folder remotely to filter for — so `allow_patterns`
+      matched nothing and silently downloaded zero files. The fix is to let
+      `local_dir` itself point at the desired nested destination (e.g.
+      `pp_ocr_small/det`) rather than trying to filter a subfolder that
+      doesn't exist on the remote side.
     """
     if os.path.exists(local_path):
         if progress_callback:
             progress_callback(f"{repo_id}: already downloaded ✓")
         return local_path
-    kwargs = {"repo_id": repo_id, "local_dir": local_dir}
-    if subfolder is not None:
-        kwargs["allow_patterns"] = [f"{subfolder}/*"]
-    downloaded_dir = downloader(**kwargs)
+    downloaded_dir = downloader(repo_id=repo_id, local_dir=local_dir)
     if progress_callback:
         progress_callback(f"{repo_id}: downloaded ✓")
-    return (
-        os.path.join(downloaded_dir, subfolder, filename)
-        if subfolder is not None
-        else os.path.join(downloaded_dir, filename)
-    )
+    return os.path.join(downloaded_dir, filename)
 
 
 def resolve_model_paths(downloader=snapshot_download, progress_callback=None) -> ModelPaths:
@@ -131,32 +128,28 @@ def resolve_model_paths(downloader=snapshot_download, progress_callback=None) ->
     ocr_det_medium = _resolve_local_or_download(
         "pp_ocr_medium/det/inference.onnx",
         repo_id="PaddlePaddle/PP-OCRv6_medium_det_onnx",
-        local_dir="pp_ocr_medium",
-        subfolder="det",
+        local_dir="pp_ocr_medium/det",
         downloader=downloader,
         progress_callback=progress_callback,
     )
     ocr_rec_medium = _resolve_local_or_download(
         "pp_ocr_medium/rec/inference.onnx",
         repo_id="PaddlePaddle/PP-OCRv6_medium_rec_onnx",
-        local_dir="pp_ocr_medium",
-        subfolder="rec",
+        local_dir="pp_ocr_medium/rec",
         downloader=downloader,
         progress_callback=progress_callback,
     )
     ocr_det_small = _resolve_local_or_download(
         "pp_ocr_small/det/inference.onnx",
         repo_id="PaddlePaddle/PP-OCRv6_small_det_onnx",
-        local_dir="pp_ocr_small",
-        subfolder="det",
+        local_dir="pp_ocr_small/det",
         downloader=downloader,
         progress_callback=progress_callback,
     )
     ocr_rec_small = _resolve_local_or_download(
         "pp_ocr_small/rec/inference.onnx",
         repo_id="PaddlePaddle/PP-OCRv6_small_rec_onnx",
-        local_dir="pp_ocr_small",  # fixed: was "pp_ocr_medium" in the original
-        subfolder="rec",
+        local_dir="pp_ocr_small/rec",  # fixed: was "pp_ocr_medium" (collision) in the original
         downloader=downloader,
         progress_callback=progress_callback,
     )
