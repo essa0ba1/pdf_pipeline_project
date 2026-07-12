@@ -17,7 +17,7 @@ from pathlib import Path
 import streamlit as st
 from huggingface_hub import snapshot_download
 
-from pdf_pipeline import (
+from doc_pipeline import (
     DocLayoutV3,
     TableFormerONNX,
     get_ocr_backend,
