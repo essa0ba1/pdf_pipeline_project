@@ -17,7 +17,7 @@ from pathlib import Path
 import streamlit as st
 from huggingface_hub import snapshot_download
 
-from doc_pipeline import (
+from pdf_pipeline import (
     DocLayoutV3,
     TableFormerONNX,
     get_ocr_backend,
@@ -53,11 +53,17 @@ def _resolve_local_or_download(
     subfolder: str | None = None,
     filename: str = "inference.onnx",
     downloader=snapshot_download,
+    progress_callback=None,
 ) -> str:
     """
     Return `local_path` if it already exists on disk; otherwise download the
     repo via `downloader` (defaults to `huggingface_hub.snapshot_download`,
     swappable in tests) and return the resolved path to `filename` inside it.
+
+    `progress_callback`, if given, is called once with a short human-readable
+    message after this model is resolved (whether it was already local or
+    freshly downloaded) — used to drive a live status indicator in the UI
+    without making this function depend on Streamlit.
 
     Centralizing this "check local, else download" pattern also fixes three
     bugs present in the original per-model inline logic:
@@ -71,11 +77,15 @@ def _resolve_local_or_download(
       what's used here
     """
     if os.path.exists(local_path):
+        if progress_callback:
+            progress_callback(f"{repo_id}: already downloaded ✓")
         return local_path
     kwargs = {"repo_id": repo_id, "local_dir": local_dir}
     if subfolder is not None:
         kwargs["allow_patterns"] = [f"{subfolder}/*"]
     downloaded_dir = downloader(**kwargs)
+    if progress_callback:
+        progress_callback(f"{repo_id}: downloaded ✓")
     return (
         os.path.join(downloaded_dir, subfolder, filename)
         if subfolder is not None
@@ -83,7 +93,7 @@ def _resolve_local_or_download(
     )
 
 
-def resolve_model_paths(downloader=snapshot_download) -> ModelPaths:
+def resolve_model_paths(downloader=snapshot_download, progress_callback=None) -> ModelPaths:
     """
     Resolve local paths to every model weight the pipeline needs, downloading
     only what's missing. Pure function of the local filesystem + `downloader`
@@ -93,6 +103,11 @@ def resolve_model_paths(downloader=snapshot_download) -> ModelPaths:
         paths = resolve_model_paths(downloader=fake_snapshot_download)
         assert paths.ocr_rec_medium.endswith("inference.onnx")
 
+    `progress_callback`, if given, is called once per model with a short
+    status message — used to drive a live "all models ready" indicator in
+    the UI. Optional and side-effect-only, so it never affects the return
+    value and doesn't need to be supplied in tests.
+
     Safe to call more than once — every branch just checks for an existing
     local file first.
     """
@@ -101,13 +116,17 @@ def resolve_model_paths(downloader=snapshot_download) -> ModelPaths:
         repo_id="PaddlePaddle/PP-DocLayoutV3_onnx",
         local_dir="PP-DocLayout",
         downloader=downloader,
+        progress_callback=progress_callback,
     )
 
-    table_artifacts = (
-        "tableformerv1"
-        if os.path.exists("tableformerv1")
-        else downloader(repo_id="bakhil-aissa/tableformerv1", local_dir="tableformerv1")
-    )
+    if os.path.exists("tableformerv1"):
+        table_artifacts = "tableformerv1"
+        if progress_callback:
+            progress_callback("bakhil-aissa/tableformerv1: already downloaded ✓")
+    else:
+        table_artifacts = downloader(repo_id="bakhil-aissa/tableformerv1", local_dir="tableformerv1")
+        if progress_callback:
+            progress_callback("bakhil-aissa/tableformerv1: downloaded ✓")
 
     ocr_det_medium = _resolve_local_or_download(
         "pp_ocr_medium/det/inference.onnx",
@@ -115,6 +134,7 @@ def resolve_model_paths(downloader=snapshot_download) -> ModelPaths:
         local_dir="pp_ocr_medium",
         subfolder="det",
         downloader=downloader,
+        progress_callback=progress_callback,
     )
     ocr_rec_medium = _resolve_local_or_download(
         "pp_ocr_medium/rec/inference.onnx",
@@ -122,6 +142,7 @@ def resolve_model_paths(downloader=snapshot_download) -> ModelPaths:
         local_dir="pp_ocr_medium",
         subfolder="rec",
         downloader=downloader,
+        progress_callback=progress_callback,
     )
     ocr_det_small = _resolve_local_or_download(
         "pp_ocr_small/det/inference.onnx",
@@ -129,6 +150,7 @@ def resolve_model_paths(downloader=snapshot_download) -> ModelPaths:
         local_dir="pp_ocr_small",
         subfolder="det",
         downloader=downloader,
+        progress_callback=progress_callback,
     )
     ocr_rec_small = _resolve_local_or_download(
         "pp_ocr_small/rec/inference.onnx",
@@ -136,6 +158,7 @@ def resolve_model_paths(downloader=snapshot_download) -> ModelPaths:
         local_dir="pp_ocr_small",  # fixed: was "pp_ocr_medium" in the original
         subfolder="rec",
         downloader=downloader,
+        progress_callback=progress_callback,
     )
 
     return ModelPaths(
@@ -231,7 +254,15 @@ def main() -> None:
     st.title("PDF Pipeline")
     st.caption("Extract structured markdown from PDFs and scanned images.")
 
-    model_paths = resolve_model_paths()
+    if not st.session_state.get("models_ready"):
+        with st.status("Preparing models…", expanded=True) as status:
+            model_paths = resolve_model_paths(progress_callback=status.write)
+            status.update(label="✅ All models ready", state="complete", expanded=False)
+        st.session_state["models_ready"] = True
+        st.session_state["model_paths"] = model_paths
+    else:
+        model_paths = st.session_state["model_paths"]
+        st.caption("✅ All models ready")
 
     with st.sidebar:
         st.header("Settings")
