@@ -9,10 +9,13 @@ Run from the project root (next to the `pdf_pipeline/` package folder):
 from __future__ import annotations
 
 import base64
+import os
 import re
+from dataclasses import dataclass
 from pathlib import Path
 
 import streamlit as st
+from huggingface_hub import snapshot_download
 
 from pdf_pipeline import (
     DocLayoutV3,
@@ -21,106 +24,151 @@ from pdf_pipeline import (
     process_document,
     setup_pipeline_logging,
 )
-import os
-from huggingface_hub import snapshot_download
-
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 IMAGE_LINK_RE = re.compile(r"!\[([^\]]*)\]\(([^)]+)\)")
 
-PP_DOCLAYOUT_PATH = ("PP-DocLayout/inference.onnx" if os.path.exists("PP-DocLayout/inference.onnx") 
-    else os.path.join(
-        snapshot_download(
-            repo_id="PaddlePaddle/PP-DocLayoutV3_onnx",
-            local_dir="PP-DocLayout",
-           
-        ),
-        "inference.onnx"
+REC_KEYS_FILENAME = "ch_en_dict.txt"
+
+
+# --------------------------------------------------------------------------- #
+# Model path resolution — pulled out of module scope so it can be imported
+# and unit-tested without triggering real downloads on `import main`.
+# --------------------------------------------------------------------------- #
+@dataclass(frozen=True)
+class ModelPaths:
+    layout: str
+    table_artifacts: str
+    ocr_det_small: str
+    ocr_rec_small: str
+    ocr_det_medium: str
+    ocr_rec_medium: str
+    ocr_rec_keys: str
+
+
+def _resolve_local_or_download(
+    local_path: str,
+    repo_id: str,
+    local_dir: str,
+    subfolder: str | None = None,
+    filename: str = "inference.onnx",
+    downloader=snapshot_download,
+) -> str:
+    """
+    Return `local_path` if it already exists on disk; otherwise download the
+    repo via `downloader` (defaults to `huggingface_hub.snapshot_download`,
+    swappable in tests) and return the resolved path to `filename` inside it.
+
+    Centralizing this "check local, else download" pattern also fixes two
+    bugs present in the original per-model inline logic:
+    - the medium OCR recognizer path used to skip appending `filename`,
+      resolving to a directory instead of the actual model file
+    - the small OCR recognizer's fallback downloaded into the *medium*
+      model's local_dir by mistake
+    """
+    if os.path.exists(local_path):
+        return local_path
+    kwargs = {"repo_id": repo_id, "local_dir": local_dir}
+    if subfolder is not None:
+        kwargs["subfolder"] = subfolder
+    downloaded_dir = downloader(**kwargs)
+    return os.path.join(downloaded_dir, filename)
+
+
+def resolve_model_paths(downloader=snapshot_download) -> ModelPaths:
+    """
+    Resolve local paths to every model weight the pipeline needs, downloading
+    only what's missing. Pure function of the local filesystem + `downloader`
+    (injectable for tests — pass a fake/mock instead of hitting the network),
+    so it can be exercised directly:
+
+        paths = resolve_model_paths(downloader=fake_snapshot_download)
+        assert paths.ocr_rec_medium.endswith("inference.onnx")
+
+    Safe to call more than once — every branch just checks for an existing
+    local file first.
+    """
+    layout = _resolve_local_or_download(
+        "PP-DocLayout/inference.onnx",
+        repo_id="PaddlePaddle/PP-DocLayoutV3_onnx",
+        local_dir="PP-DocLayout",
+        downloader=downloader,
     )
-) 
 
-
-TableFormerPath = ("tableformerv1" if os.path.exists("tableformerv1") else  snapshot_download(
-    repo_id="bakhil-aissa/tableformerv1",
-    local_dir="tableformerv1",))
-
-
-
-DET_PATH_MEDIUM = (
-    "pp_ocr_medium/det/inference.onnx" 
-    if os.path.exists("pp_ocr_medium/det/inference.onnx") 
-    else os.path.join(
-        snapshot_download(
-            repo_id="PaddlePaddle/PP-OCRv6_medium_det_onnx",
-            local_dir="pp_ocr_medium",
-            subfolder="det",
-        ),
-        "inference.onnx"
+    table_artifacts = (
+        "tableformerv1"
+        if os.path.exists("tableformerv1")
+        else downloader(repo_id="bakhil-aissa/tableformerv1", local_dir="tableformerv1")
     )
-)
 
-REC_PATH_MEDIUM = (
-    "pp_ocr_medium/rec/inference.onnx" 
-    if os.path.exists("pp_ocr_medium/rec/inference.onnx") 
-    else snapshot_download(
-    repo_id="PaddlePaddle/PP-OCRv6_medium_rec_onnx",
-    local_dir="pp_ocr_medium",
-    subfolder="rec",)
-    
-)
-
-
-DET_PATH_SMALL= (
-    "pp_ocr_small/det/inference.onnx" 
-    if os.path.exists("pp_ocr_small/det/inference.onnx") 
-    else os.path.join(
-        snapshot_download(
-            repo_id="PaddlePaddle/PP-OCRv6_small_det_onnx",
-            local_dir="pp_ocr_small",
-            subfolder="det",
-        ),
-        "inference.onnx"
+    ocr_det_medium = _resolve_local_or_download(
+        "pp_ocr_medium/det/inference.onnx",
+        repo_id="PaddlePaddle/PP-OCRv6_medium_det_onnx",
+        local_dir="pp_ocr_medium",
+        subfolder="det",
+        downloader=downloader,
     )
-)
-REC_PATH_SMALL = (
-    "pp_ocr_small/rec/inference.onnx" 
-    if os.path.exists("pp_ocr_small/rec/inference.onnx") 
-    else os.path.join(
-        snapshot_download(
-            repo_id="PaddlePaddle/PP-OCRv6_small_rec_onnx",
-            local_dir="pp_ocr_medium",
-            subfolder="rec",
-        ),
-        "inference.onnx"
+    ocr_rec_medium = _resolve_local_or_download(
+        "pp_ocr_medium/rec/inference.onnx",
+        repo_id="PaddlePaddle/PP-OCRv6_medium_rec_onnx",
+        local_dir="pp_ocr_medium",
+        subfolder="rec",
+        downloader=downloader,
     )
-)
+    ocr_det_small = _resolve_local_or_download(
+        "pp_ocr_small/det/inference.onnx",
+        repo_id="PaddlePaddle/PP-OCRv6_small_det_onnx",
+        local_dir="pp_ocr_small",
+        subfolder="det",
+        downloader=downloader,
+    )
+    ocr_rec_small = _resolve_local_or_download(
+        "pp_ocr_small/rec/inference.onnx",
+        repo_id="PaddlePaddle/PP-OCRv6_small_rec_onnx",
+        local_dir="pp_ocr_small",  # fixed: was "pp_ocr_medium" in the original
+        subfolder="rec",
+        downloader=downloader,
+    )
 
-        
+    return ModelPaths(
+        layout=layout,
+        table_artifacts=table_artifacts,
+        ocr_det_small=ocr_det_small,
+        ocr_rec_small=ocr_rec_small,
+        ocr_det_medium=ocr_det_medium,
+        ocr_rec_medium=ocr_rec_medium,
+        ocr_rec_keys=REC_KEYS_FILENAME,
+    )
 
-REC_KEYS_PATH=  "ch_en_dict.txt"
 
-
+# --------------------------------------------------------------------------- #
+# Pipeline loading (Streamlit-cached; wraps the pure resolve step above)
+# --------------------------------------------------------------------------- #
 @st.cache_resource(show_spinner="Loading models…")
 def load_pipeline(
     layout_model: str,
     table_artifact_root: str,
     table_variant: str,
     ocr_backend_name: str,
-    rec_path : str ,
-    det_path : str ,
-    rec_keys_path : str ,
+    rec_path: str,
+    det_path: str,
+    rec_keys_path: str,
 ):
     setup_pipeline_logging(level="INFO")
     layout_detector = DocLayoutV3(layout_model)
-   
+
     table_runner = TableFormerONNX(
         artifact_root=table_artifact_root,
         variant=table_variant,
     )
     if ocr_backend_name == "rapidocr":
-        table_ocr_backend = get_ocr_backend(ocr_backend_name,det_model_path=det_path,rec_model_path=rec_path,rec_keys_path=rec_keys_path)
-        page_ocr_backend = get_ocr_backend(ocr_backend_name,det_model_path=det_path,rec_model_path=rec_path,rec_keys_path=rec_keys_path)
-    else :
+        table_ocr_backend = get_ocr_backend(
+            ocr_backend_name, det_model_path=det_path, rec_model_path=rec_path, rec_keys_path=rec_keys_path
+        )
+        page_ocr_backend = get_ocr_backend(
+            ocr_backend_name, det_model_path=det_path, rec_model_path=rec_path, rec_keys_path=rec_keys_path
+        )
+    else:
         table_ocr_backend = get_ocr_backend(ocr_backend_name)
         page_ocr_backend = get_ocr_backend(ocr_backend_name)
     return layout_detector, page_ocr_backend, table_runner, table_ocr_backend
@@ -175,15 +223,17 @@ def main() -> None:
     st.title("PDF Pipeline")
     st.caption("Extract structured markdown from PDFs and scanned images.")
 
+    model_paths = resolve_model_paths()
+
     with st.sidebar:
         st.header("Settings")
         layout_model = st.selectbox(
             "Layout model",
-            options=[PP_DOCLAYOUT_PATH],
+            options=[model_paths.layout],
         )
         table_artifact_root = st.selectbox(
             "TableFormer artifacts",
-           options=["tableformerv1"],
+            options=[model_paths.table_artifacts],
         )
         table_variant = st.selectbox(
             "TableFormer variant",
@@ -198,20 +248,20 @@ def main() -> None:
         if ocr_backend == "rapidocr":
             path_det = st.selectbox(
                 "RapidOCR detector model",
-                options=[DET_PATH_SMALL, DET_PATH_MEDIUM],
+                options=[model_paths.ocr_det_small, model_paths.ocr_det_medium],
                 index=0,
             )
             path_rec = st.selectbox(
                 "RapidOCR recognizer model",
-                options=[REC_PATH_SMALL, REC_PATH_MEDIUM],
+                options=[model_paths.ocr_rec_small, model_paths.ocr_rec_medium],
                 index=0,
             )
             path_keys = st.selectbox(
                 "RapidOCR keys model",
-                options=[REC_KEYS_PATH],
+                options=[model_paths.ocr_rec_keys],
                 index=0,
             )
-            
+
         resolution = st.slider("PDF render DPI", min_value=72, max_value=300, value=150)
         pages_raw = st.text_input(
             "PDF pages (optional)",
@@ -268,8 +318,6 @@ def main() -> None:
             det_path=path_det,
             rec_keys_path=path_keys,
         )
-        
-      
 
         work_dir = PROJECT_ROOT / ".streamlit_output" / Path(uploaded.name).stem
         doc_path = save_upload(uploaded, work_dir)
