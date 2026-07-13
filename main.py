@@ -16,6 +16,8 @@ from pathlib import Path
 
 import streamlit as st
 from huggingface_hub import snapshot_download
+import subprocess
+import platform
 
 from doc_pipeline import (
     DocLayoutV3,
@@ -391,6 +393,29 @@ def main() -> None:
             mime="text/markdown",
             use_container_width=True,
         )
+    # get lscpu output
+    # Only run lscpu on Linux systems
+    if platform.system() == "Linux":
+        try:
+            # Capture full lscpu output
+            lscpu_output = subprocess.check_output(["lscpu"], text=True)
+            # Extract key hardware metrics
+            key_metrics = {}
+            # Filter for high-impact system stats
+            for line in lscpu_output.splitlines():
+                if line.startswith(("CPU(s):", "Core(s) per socket:", "Thread(s) per core:", 
+                                   "Model name:", "CPU MHz:", "Virtualization:", "Architecture:")):
+                    key, value = line.split(":", 1)
+                    key_metrics[key.strip()] = value.strip()
+            
+            # Display formatted metrics in Streamlit
+            st.subheader("System CPU Information")
+            for metric, value in key_metrics.items():
+                st.write(f"**{metric}:** {value}")
+        except Exception as e:
+            st.warning(f"Could not fetch CPU information: {str(e)}")
+    else:
+        st.info("lscpu is only available on Linux systems")
 
 
 if __name__ == "__main__":
